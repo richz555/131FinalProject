@@ -1,0 +1,635 @@
+---
+title: "Final Project"
+author: "Richard Zhao and Yixuan Li"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: hide
+date: 'Fall 2022'
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE,
+                      warning = FALSE)
+```
+
+# Introduction
+
+The purpose of this project is to generate a model that will predict whether or not customers will purchase an offer from a direct marketing campaign for iFood.
+
+## What is iFood?
+
+[iFood](https://www.ifood.com.br/) is a lead food delivery app in Brazil that is present in over a thousand cities. They have around several hundred thousands of registered customers and serve almost one million consumers a year. They sell products from 5 major categories: wines, rare meat products, exotic fruits, specially prepared fish, and sweet products. Customers can order and obtain these products through 3 methods: physical stores, catalogs, and the company's website.
+
+```{r, echo = FALSE}
+knitr::include_graphics("ifood.png", error = FALSE)
+```
+
+## How Might This Model Be Useful?
+
+iFood has had solid revenues and a healthy bottom line in the past 3 years, however the profit growth perspectives for the next 3 years are not promising. This model explores the effectiveness of marketing campaigns in order to increase consumer sales and profit growth for the company.
+
+# Loading Data and Packages
+
+## Packages
+
+```{r packages}
+# load packages
+library(tidyverse)
+library(tidymodels)
+library(caTools)
+library(car)
+library(dplyr)
+library(janitor)
+library(kernlab)
+library(MASS)
+library(discrim)
+library(parsnip)
+library(klaR)
+library(xgboost)
+library(vembedr)
+library(kknn)
+library(vip)
+library(corrr)
+library(corrplot)
+```
+
+## Raw Data
+
+This project uses data from [Marketing Analytics](https://www.kaggle.com/datasets/jackdaoud/marketing-data?select=ifood_df.csv) on Kaggle, which has a dataset containing 2205 customer profiles from this company.
+```{r read raw data}
+# read in data
+customers <- read_csv("data/ifood_df.csv")
+head(customers)
+```
+
+```{r}
+dim(customers)
+```
+
+Our raw dataset has 2205 customer profiles and 39 different variables. We have selected 15 out of the 39 variables to use for our model, with 14 of them being predictors and 1 being response, which is our response variable. Here are those key variables:
+
+* `income`: The customer's yearly household income
+
+* `recency`: The number of days since the customer's last purchase
+
+* `num_deals_purchases`: The number of purchases made with a discount
+
+* `num_web_purchases`: The number of purchases made through the company's website
+
+* `num_catalog_purchases`: The number of purchases made using a catalog
+
+* `num_store_purchases`: The number of purchases made directly in stores
+
+* `num_web_visits_month`: The number of visits to the company's website in the last month
+
+* `complain`: Whether the customer has complained in the last 2 years (0 for no complains, 1 for complains)
+
+* `age`: Age of the customer
+
+* `customer_days`: Date of the customer's enrollment with the company
+
+* `mnt_total`: Total amount of money spent on products in the last 2 years
+
+* `accepted_cmp_overall`: Total amount of campaigns the customer accepted (5 total campaigns)
+
+* `children`: Number of children in the customer's household
+
+* `education`: The customer's level of education (0 for basic education, 1 for college education, 2 for master education, 3 for 2n cycle education, 4 for phd education)
+
+* `response`: If the customer will accept the current campaign (1 for accept, 0 for not accept)
+
+## Data Cleaning
+
+As we can see from our raw data, there is some data cleaning that we have to do. The dataset contains 39 variables, so we will need to cut down on the number of predictor variables by deselecting unimportant ones and combining similar ones. In addition, some variables have to be converted into factors, and we need to check for duplicate data.
+
+Clean names.
+```{r clean names}
+customers <- customers %>% clean_names()
+```
+
+Combine `kidhome` and `teenhome` into `children`.
+```{r combine children}
+#kids + teenager
+customers <- mutate(customers, children = kidhome + teenhome)
+customers <- dplyr::select(customers, -kidhome, -teenhome)
+```
+
+There are 5 different education levels for the customer profiles. We want to set `education_basic` = 1, `education_graduation` = 2, `education_master` = 3, `education_2n_cycle` = 3, and `education_ph_d` = 4. Then we combine these predictors into one `education` predictor.
+```{r combine education}
+customers$education_graduation[customers$education_graduation == 1] <- 2
+customers$education_master[customers$education_master == 1] <- 3
+customers$education_2n_cycle[customers$education_2n_cycle == 1] <- 3
+customers$education_ph_d[customers$education_ph_d == 1] <- 4
+customers <- mutate(customers, education = education_basic + education_graduation + education_master + education_2n_cycle + education_ph_d)
+customers <- dplyr::select(customers, -education_basic, -education_graduation, -education_master, -education_2n_cycle, -education_ph_d)
+```
+
+Remove the accepted campaign variables because the dataset already contains a total accepted campaigns variable.
+```{r remove accepted campaigns}
+customers <- dplyr::select(customers, -accepted_cmp3, -accepted_cmp4, -accepted_cmp5, -accepted_cmp1, -accepted_cmp2)
+```
+
+Remove all variables regarding product purchases except for the total.
+```{r remove total amount of regular products}
+customers <- dplyr::select(customers, -mnt_regular_prods, -mnt_wines, -mnt_fruits, -mnt_meat_products, -mnt_fish_products, -mnt_sweet_products, -mnt_gold_prods)
+```
+
+Remove all variables regarding marital status.
+```{r remove marital status}
+customers <- dplyr::select(customers, -marital_divorced, -marital_married, -marital_single, -marital_together, -marital_widow)
+```
+
+Remove `z_cost_contact` and `z_revenue`.
+```{r remove z_cost_contact and z_revenue}
+customers <- dplyr::select(customers, -z_cost_contact, -z_revenue)
+```
+
+Factor the categorical variables.
+```{r turn into factors}
+# We factor these predictors because they have a fixed and known set of possible values
+customers <- mutate(customers, response = factor(response), complain = factor(complain), education = factor(education), accepted_cmp_overall = factor(accepted_cmp_overall))
+```
+
+Remove any duplicate data in the dataset.
+```{r remove duplicate data}
+customers <- customers %>% distinct()
+```
+
+This is our data after the cleaning process.
+```{r final data summary}
+head(customers)
+dim(customers)
+```
+Now we have 2019 customer profiles and 15 different variables, with 14 of them being predictors and 1 being response, which is our response variable.
+
+## Data Split
+
+We split the data into an 80% training set and a 20% testing set. We set a random seed to make sure that the training and testing splits are the same whenever we run our code. We use stratified sampling and stratify on the response variable, `response`.
+```{r}
+set.seed(1208)
+customers_split <- initial_split(customers, prop = 0.8, strata = response)
+customers_train <- training(customers_split)
+customers_test <- testing(customers_split)
+dim(customers_train)
+dim(customers_test)
+```
+
+The training set contains 1615 observations, and the testing set contains 404 observations.
+
+# Exploratory Data Analysis
+
+The EDA is only based on the training set.
+
+Let's examine the relationship between our numeric predictors through a correlation plot.
+```{r corrplot}
+customers_train %>%
+  dplyr::select(is.numeric) %>%
+  cor() %>%
+  corrplot(type = "lower", tl.cex = 0.7)
+```
+
+Many of our predictor variables have little to no correlation at all. There seems to be a strong positive correlation between `mnt_total` and `income`. This makes sense because households with higher incomes would probably purchase more products. I found it interesting that there is a negative correlation between income and children. I expected that a household with more children would have a higher income.
+
+Let's make a bar plot of all the customer's education levels.
+```{r}
+ggplot(customers_train, aes(education)) + geom_bar() + ggtitle("Customer Education Levels")
+```
+
+A majority of customers have a college education, which is reasonable as not many people want to pursue a higher degree of education after college.
+
+Let's make a box plot of education vs income.
+```{r education vs income}
+ggplot(customers_train, aes(x = education, y = income)) + geom_boxplot() + ggtitle("Education vs Income")
+```
+
+Education does have an impact on income, as customers with a college education or higher have a higher income.
+
+Let's take a look at the distribution of age in the customers.
+```{r}
+ggplot(customers_train, aes(age)) + geom_histogram(bins = 30) + ggtitle("Age")
+```
+
+Most of the customers are between 35 to 70 years old.
+
+Now let's look at the distribution of `response`, which is our response variable.
+
+```{r}
+ggplot(customers_train, aes(response)) + geom_bar() + ggtitle("Response")
+```
+
+A large majority of the customers did not accept the direct marketing campaign offer.
+
+Let's break this down by education level.
+```{r}
+ggplot(customers_train, aes(response)) + geom_histogram(stat = "count") + facet_wrap(~education) + ggtitle("Response by Education Level")
+```
+
+There do not seem to be significant changes between education levels, however customers with a college education had the most observations.
+
+```{r}
+ggplot(customers_train, aes(mnt_total)) + geom_bar(aes(fill = response)) + ggtitle("Response by Total Amount Spent")
+```
+
+As shown in this graph, the less amount of money they have spent on products in the past 2 years, the more likely the customer is to reject the campaign offer.
+
+```{r}
+ggplot(customers_train, aes(accepted_cmp_overall)) + geom_bar(aes(fill = response)) + ggtitle("Response by Total Campaigns Accepted")
+```
+
+Most of the customers who rejected the current campaign offer had accepted zero or only one of the past five campaigns the company has done. The ratio between customers who accepted and rejected the campaign offer decreases for customers who have accepted multiple past campaigns.
+
+```{r}
+ggplot(customers_train, aes(recency)) + geom_bar(aes(fill = response)) + ggtitle("Response by Recency")
+```
+
+As we can see from this graph, the customer is more likely to reject the campaign offer the longer they haven't purchased anything from the company.
+
+# Model Building
+
+Now we can start building our models. We can build a recipe and fold the training data into 10 folds using cross-validation.
+
+## Recipe Building
+
+We will use the 14 predictors in our recipe. The nominal predictors are changed into dummy variables, and all the variables are centered and scaled.
+```{r recipe building}
+customers_recipe <- recipe(response ~ income + recency + num_deals_purchases + num_web_purchases + num_catalog_purchases + num_store_purchases + num_web_visits_month + complain + age + customer_days + mnt_total + accepted_cmp_overall + children + education, data = customers_train) %>%
+  step_dummy(all_nominal_predictors()) %>%
+  step_normalize(all_predictors())
+```
+
+## V-fold Cross Validation
+
+Now let's use stratified cross validation and stratify on the response variable, `response`.
+```{r k-fold cross validation}
+customers_folds <- vfold_cv(data = customers_train, v = 10, strata = response)
+```
+
+## Models
+
+### Boosted Tree Model
+
+For the first model, we created a boosted tree model. We set `trees = 10` to grow 10 trees with a maximal depth of 4. We set the engine to `xgboost` and tuned `trees`.
+```{r boosted trees}
+boost_spec <- boost_tree(trees = 10, tree_depth = 4) %>%
+  set_engine("xgboost") %>%
+  set_mode("classification")
+
+boost_fit <- fit(boost_spec, response ~ income + recency + num_deals_purchases + num_web_purchases + num_catalog_purchases + num_store_purchases + num_web_visits_month + complain + age + customer_days + mnt_total + accepted_cmp_overall + children + education, data = customers_train)
+
+boost_wf <- workflow() %>%
+  add_model(boost_spec %>% set_args(trees = tune())) %>%
+  add_recipe(customers_recipe)
+```
+
+We then set up a tuning grid and gave the trees a range from 0 to 50.
+```{r}
+boost_grid <- grid_regular(trees(range = c(0, 50)), levels = 10)
+
+tune_boost <- tune_grid(
+  boost_wf,
+  resamples = customers_folds,
+  grid = boost_grid,
+  metrics = metric_set(roc_auc)
+)
+```
+
+Now we plot the model.
+```{r}
+autoplot(tune_boost)
+```
+
+We can see from this plot that our best accuracy is 0.86 at 38 trees.
+
+### Random Forest Model
+
+For the second model, we created a bagging random forest model. We tuned `mtry`, `trees`, and `min_n`. We set the engine to `ranger`.
+```{r random forest}
+bagging_spec <- rand_forest(mtry = .cols()) %>%
+  set_engine("ranger", importance = "impurity") %>%
+  set_mode("classification")
+
+bagging_fit <- fit(bagging_spec, response ~ income + recency + num_deals_purchases + num_web_purchases + num_catalog_purchases + num_store_purchases + num_web_visits_month + complain + age + customer_days + mnt_total + accepted_cmp_overall + children + education, data = customers_train)
+
+bagging_wf <- workflow() %>%
+  add_model(bagging_spec %>% set_args(mtry = tune(), trees = tune(), min_n = tune())) %>%
+  add_recipe(customers_recipe)
+```
+
+We then set up a tuning grid and set the tuning parameters. We gave `mtry` a range from 1 to 14 because that is how many predictors there are in the model. We then set `trees` to 10, gave `min_n` a range from 1 to 50, and `levels` to 4.
+```{r}
+bagging_grid <- grid_regular(mtry(range = c(1, 14)), trees(range = c(1, 10)), min_n(range = c(1, 50)), levels = 4)
+
+tune_bagging = tune_grid(
+  bagging_wf,
+  resamples = customers_folds,
+  grid = bagging_grid,
+  metrics = metric_set(roc_auc)
+)
+``` 
+
+Now we plot the model.
+```{r}
+autoplot(tune_bagging)
+```
+
+From these plots it seems that the bottom right plot featured our most accurate model. This model has 10 trees, 8 randomly selected predictors, and a minimal node size of 50, with around an accuracy of 0.85.
+
+### Logistic Regression Model
+
+For the third model we created a logistic regression fit. We set the engine to `glm`.
+```{r logistic regression}
+log_reg <- logistic_reg() %>% 
+  set_engine("glm") %>% 
+  set_mode("classification")
+
+log_wkflow <- workflow() %>% 
+  add_model(log_reg) %>% 
+  add_recipe(customers_recipe)
+
+log_fit <- fit_resamples(resamples = customers_folds, log_wkflow, control = control_resamples(save_pred = TRUE))
+collect_metrics(log_fit)
+```
+
+This table contains the mean `accuracy` and `roc_auc` for our logistic regression model across 10 folds.
+
+### Latent Dirichlet Allocation Model
+
+For the fourth model we created a LDA model fit. We set the engine to `MASS`.
+```{r}
+lda_mod <- discrim_linear() %>% 
+  set_mode("classification") %>% 
+  set_engine("MASS")
+
+lda_wkflow <- workflow() %>% 
+  add_model(lda_mod) %>% 
+  add_recipe(customers_recipe)
+
+lda_fit <- fit_resamples(resamples = customers_folds, lda_wkflow, control = control_resamples(save_pred = TRUE))
+collect_metrics(lda_fit)
+```
+
+This table contains the mean `accuracy` and `roc_auc` for our LDA model across 10 folds. As we can see, these values are very similar to our values from the logistic regression model.
+
+### Decision Tree Model
+
+For the fifth model, we created a decision tree model. We tuned `cost_complexity` and set the engine to `rpart`.
+```{r decision tree}
+tree_spec <- decision_tree() %>%
+  set_engine("rpart")
+
+class_tree_spec <- tree_spec %>%
+  set_mode("classification")
+
+class_tree_fit <- class_tree_spec %>%
+  fit(response ~ income + recency + num_deals_purchases + num_web_purchases + num_catalog_purchases + num_store_purchases + num_web_visits_month + complain + age + customer_days + mnt_total + accepted_cmp_overall + children + education, data = customers_train)
+
+class_tree_wf <- workflow() %>%
+  add_model(class_tree_spec %>% set_args(cost_complexity = tune())) %>%
+  add_recipe(customers_recipe)
+```
+
+We then set up a tuning grid and set the tuning parameters. We gave `cost_complexity` a range from -3 to -1 and set `levels` to 8.
+```{r}
+param_grid <- grid_regular(cost_complexity(range = c(-3, -1)), levels = 8)
+
+tune_decision_tree = tune_grid(
+  class_tree_wf, 
+  resamples = customers_folds, 
+  grid = param_grid, 
+  metrics = metric_set(roc_auc)
+)
+
+```
+
+Now we plot the model.
+```{r}
+autoplot(tune_decision_tree)
+```
+
+We can see from this plot that the cost-complexity value of 0.001 seems to produce the highest accuracy at around 0.75. As the cost-complexity parameter increases, the roc_auc drops.
+
+### Ridge Regression Model
+
+For the sixth model, we created a ridge regression model. We tuned `penalty` and set `mixture` to 0 to specify a ridge model. Then we set the engine to `glmnet`.
+```{r ridge regression}
+ridge_spec <- 
+  logistic_reg(penalty = tune(), mixture = 0) %>% 
+  set_mode("classification") %>% 
+  set_engine("glmnet")
+
+ridge_fit <- fit(ridge_spec, response ~ income + recency + num_deals_purchases + num_web_purchases + num_catalog_purchases + num_store_purchases + num_web_visits_month + complain + age + customer_days + mnt_total + accepted_cmp_overall + children + education, data = customers_train)
+
+ridge_workflow <- workflow() %>% 
+  add_recipe(customers_recipe) %>% 
+  add_model(ridge_spec)
+```
+
+We then set up a tuning grid and set the tuning parameters. We gave `penalty` a range from -2 to 0 and set `levels` to 50.
+```{r}
+penalty_grid <- grid_regular(penalty(range = c(-2, 0)), levels = 50)
+
+tune_ridge <- tune_grid(
+  ridge_workflow,
+  resamples = customers_folds, 
+  grid = penalty_grid,
+  metrics = metric_set(roc_auc)
+)
+```
+
+Now we plot the model.
+```{r}
+autoplot(tune_ridge)
+```
+
+We can see from this plot that as the amount of regularization increases, then the roc_auc decreases.
+
+### Lasso Regression Model
+
+For the seventh model, we created a lasso regression model. We tuned `penalty` and set `mixture` to 1 to specify a lasso model. Then we set the engine to `glmnet`. This procedure is very similar to what we did with the ridge regression model.
+```{r lasso}
+lasso_spec <- 
+  logistic_reg(penalty = tune(), mixture = 1) %>% 
+  set_mode("classification") %>% 
+  set_engine("glmnet") 
+
+lasso_fit <- fit(lasso_spec, response ~ income + recency + num_deals_purchases + num_web_purchases + num_catalog_purchases + num_store_purchases + num_web_visits_month + complain + age + customer_days + mnt_total + accepted_cmp_overall + children + education, data = customers_train)
+
+lasso_workflow <- workflow() %>% 
+  add_recipe(customers_recipe) %>% 
+  add_model(lasso_spec)
+```
+
+We then set up a tuning grid and set the tuning parameters. We gave `penalty` a range from -2 to 0 and set `levels` to 50.
+```{r}
+penalty_grid <- grid_regular(penalty(range = c(-2, 0)), levels = 50)
+
+tune_lasso <- tune_grid(
+  lasso_workflow,
+  resamples = customers_folds, 
+  grid = penalty_grid,
+  metrics = metric_set(roc_auc)
+)
+```
+
+Now we plot the model.
+```{r}
+autoplot(tune_lasso)
+```
+
+We can see from this plot that again, as the amount of regularization increases, then the roc_auc decreases.
+
+### K-Nearest Neighbor Model
+
+For the eighth and final model, we created a k-nearest neighbor model. We tuned `neighbors` and set the engine to `knn`.
+```{r, warnings = FALSE}
+knn_spec <- nearest_neighbor(neighbors = tune()) %>%
+  set_engine("kknn") %>%
+  set_mode("classification")
+
+knn_fit <- fit(knn_spec, response ~ income + recency + num_deals_purchases + num_web_purchases + num_catalog_purchases + num_store_purchases + num_web_visits_month + complain + age + customer_days + mnt_total + accepted_cmp_overall + children + education, data = customers_train)
+
+knn_wf <- workflow() %>%
+  add_model(knn_spec) %>%
+  add_recipe(customers_recipe)
+```
+
+We then set up a tuning grid and set the tuning parameters. We set `levels` to 10.
+```{r}
+knn_parameters <- parameters(knn_spec)
+
+knn_grid <- grid_regular(knn_parameters, levels = 10)
+
+
+tune_knn <- tune_grid(
+  knn_wf,
+  resamples = customers_folds,
+  grid = knn_grid,
+  metrics = metric_set(roc_auc)
+)
+```
+
+Now we plot the model.
+```{r}
+autoplot(tune_knn)
+```
+
+We can see from this plot that the ideal number of neighbors is 15, where the roc_auc is the highest at slightly above 0.80.
+
+## Model Accuracies
+
+Now we can compare the best accuracy for each of our eight models. We created one tibble containing the accuracy of each model and another tibble containing the roc auc of each model.
+```{r, warnings = FALSE}
+boost_acc <- augment(boost_fit, new_data = customers_train) %>%
+  accuracy(truth = response, estimate = .pred_class)
+boost_auc <- augment(boost_fit, new_data = customers_train) %>%
+  roc_auc(response, estimate = .pred_0)
+
+bagging_acc <- augment(bagging_fit, new_data = customers_train) %>%
+  accuracy(truth = response, estimate = .pred_class)
+bagging_auc <- augment(bagging_fit, new_data = customers_train) %>%
+  roc_auc(response, estimate = .pred_0)
+
+log_fit_train <- fit(log_wkflow, customers_train)
+log_reg_acc <- predict(log_fit_train, new_data = customers_train) %>%
+  bind_cols(customers_train) %>%
+  accuracy(truth = response, estimate = .pred_class)
+log_reg_auc <- augment(log_fit_train, new_data = customers_train) %>%
+  roc_auc(response, estimate = .pred_0)
+
+lda_fit_train <- fit(lda_wkflow, customers_train)
+lda_acc <- predict(lda_fit_train, new_data = customers_train, type = "class") %>%
+  bind_cols(customers_train) %>%
+  accuracy(truth = response, estimate = .pred_class)
+lda_auc <- augment(lda_fit_train, new_data = customers_train) %>%
+  roc_auc(response, estimate = .pred_0)
+
+decision_tree_acc <- augment(class_tree_fit, new_data = customers_train) %>%
+  accuracy(truth = response, estimate = .pred_class)
+decision_tree_auc <- augment(class_tree_fit, new_data = customers_train) %>%
+  roc_auc(response, estimate = .pred_0)
+
+best_ridge_penalty <- select_best(tune_ridge)
+ridge_final <- finalize_workflow(ridge_workflow, best_ridge_penalty)
+ridge_final_fit <- fit(ridge_final, data = customers_train)
+ridge_acc <- augment(ridge_final_fit, new_data = customers_train) %>%
+  accuracy(truth = response, estimate = .pred_class)
+ridge_auc <- augment(ridge_final_fit, new_data = customers_train) %>%
+  roc_auc(response, estimate = .pred_0)
+
+best_lasso_penalty <- select_best(tune_lasso)
+lasso_final <- finalize_workflow(lasso_workflow, best_lasso_penalty)
+lasso_final_fit <- fit(lasso_final, data = customers_train)
+lasso_acc <- augment(lasso_final_fit, new_data = customers_train) %>%
+  accuracy(truth = response, estimate = .pred_class)
+lasso_auc <- augment(lasso_final_fit, new_data = customers_train) %>%
+  roc_auc(response, estimate = .pred_0)
+
+knn_acc <- augment(knn_fit, new_data = customers_train) %>%
+  accuracy(truth = response, estimate = .pred_class)
+knn_auc <- augment(knn_fit, new_data = customers_train) %>%
+  roc_auc(response, estimate = .pred_0)
+
+accuracies <- c(log_reg_acc$.estimate, lda_acc$.estimate, boost_acc$.estimate, bagging_acc$.estimate, ridge_acc$.estimate, lasso_acc$.estimate, knn_acc$.estimate, decision_tree_acc$.estimate)
+
+roc_accuracies <- c(log_reg_auc$.estimate, lda_auc$.estimate, boost_auc$.estimate, bagging_auc$.estimate, ridge_auc$.estimate, lasso_auc$.estimate, knn_auc$.estimate, decision_tree_acc$.estimate)
+
+models <- c("Logistic Regression", "LDA", "Boosted Tree", "Random Forest Tree", "Ridge Regression", "Lasso Regression", "KNN", "Decision Tree")
+
+results_acc <- tibble(accuracies = accuracies, models = models)
+results_acc %>% 
+  arrange(-accuracies)
+
+results_auc <- tibble(roc_accuracies = roc_accuracies, models = models)
+results_auc %>%
+  arrange(-roc_accuracies)
+```
+
+By looking at the accuracy for each of our eight models, Random Forest Tree, Boosted Tree, Logistic Regression, LDA, Ridge Regression, Lasso Regression, KNN, and Decision Tree, we can see that our Random Forest Tree indeed had the highest accuracy and roc_auc. As such, this model was the best at predicting a customer's response to the direct marketing campaign, and we will use this model to fit our testing data and analyze its performance. Our worst performing model was the KNN. All of our three tree models outperformed our regression models.
+
+## Final Model Building
+
+Now that we know that our random forest tree model performed the best, let's fit it to our testing data. First we use the `select_best` function to take the tuning parameter combination with the best performance values from the random forest model.
+
+```{r best model}
+best_model <- select_best(tune_bagging, metric = "roc_auc")
+bagging_final <- finalize_workflow(bagging_wf, best_model)
+bagging_final_fit <- fit(bagging_final, data = customers_train)
+```
+
+We can plot our model's ROC curve and take a look.
+```{r}
+customers_roc_curve <- augment(bagging_final_fit, new_data = customers_test) %>%
+  roc_curve(response, estimate = .pred_0)  # computing the ROC curve for this model
+
+autoplot(customers_roc_curve)
+```
+
+The curve points towards the top left of the plot, which is what we want to see.
+
+Now we can fit this model to our testing data and examine the roc_auc.
+```{r fit to testing data}
+best_model_acc <- augment(bagging_final_fit, new_data = customers_test) %>%
+  roc_auc(response, estimate = .pred_0)
+best_model_acc
+```
+
+Our model returned a roc_auc of 0.8695 on our testing data. It is lower than the roc_auc on the training data, so our model slightly overfits the training data. However, this roc_auc is still pretty good and our model performs quite well.
+
+We can also take a look at how impactful each predictor variable was to our response.
+```{r}
+vip(bagging_fit)
+```
+
+As shown in this chart, `accepted_cmp_overall`, `recency`, and `customer_days` were the most important predictors in determining the response of a customer. Other variables such as `income`, `mnt_total`, and `age` were also fairly important.
+
+# Conclusion
+
+Overall, we went through the cleaned dataset, examined correlations between the variables, and produced multiple different models to predict a customer's response. We used boosted tree, random forest, logistic regression, lda, decision tree, ridge regression, lasso regression, and knn. We found that the random forest model worked the best and produced the highest accuracy. This is probably because the random forest model performs better for classification problems, where lots of categorical data are utilized. In addition, the random forest model decorrelates each tree, preventing them from making correlations between uncorrelated variables. This in turn increases the accuracy of the model.
+
+We also found that all of our tree models performed better than our regression models. This was expected, as tree models work better with complex datasets with multiple variables, while regression models work better with simple datasets with linear relationships.
+
+Other models such as QDA, Naive Bayes, and Support Vector Machines can be built and tested to expand on this project. In addition, our cleaned data only contained 14 out of the original 38 predictor variables, so other predictor variables can be implemented and used to build new models.
+
+This project has given us a fun and insightful experience applying my data science and machine learning knowledge to predict an iFood customer's response to the company's most recent direct marketing campaign. We hope that we can apply what we learned from this project in our future data science endeavors.
